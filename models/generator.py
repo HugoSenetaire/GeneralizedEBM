@@ -3,6 +3,9 @@ import numpy as np
 import torch.nn.functional as F
 
 
+
+
+
 class Generator(nn.Module):
     def __init__(self, nz=100, nn_type='dcgan', **kwargs):
         super().__init__()

@@ -1,0 +1,3 @@
+[submodule "models/flowplusplus"]
+	path = models/flowplusplus
+	url = git@github.com:HugoSenetaire/flowplusplus.git

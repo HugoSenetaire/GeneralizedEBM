@@ -20,7 +20,9 @@ import torch.optim as optim
 
 
 from models.generator import Generator
+from models.Ppca import ProbabilisticPCA
 from models.discriminator import Discriminator
+from models.flow_imputer import FlowPlusPLusimputer
 from models import energy_model
 
 import compute as cp
@@ -200,6 +202,8 @@ def get_loss(args):
         return cp.kale
     elif args.criterion=='kale-nlp':
         return cp.kale
+    elif args.criterion=='snl':
+        return cp.snl
 
 # choose the optimizer
 def get_optimizer(args, net_type, params):
@@ -281,7 +285,12 @@ def get_latent_sampler(args,potential,Z_dim,device):
         return samplers.IndependentMetropolisHastings(potential,  T=args.num_sampler_steps, gamma=args.lmc_gamma)
 
 
-def get_latent_noise(args,dim,device):
+def get_latent_noise(args,dim,device, input_size):
+    if args.generator=='flow':
+        loc = torch.zeros(input_size).to(device)
+        scale = torch.ones(input_size).to(device)
+        normal = torch.distributions.normal.Normal(loc, scale)
+        return normal
     dim = int(dim)
     if args.latent_noise=='gaussian':
         loc = torch.zeros(dim).to(device)
@@ -315,7 +324,7 @@ def get_energy(args,input_dims,device):
         return energy_model.Discriminator4(input_dims, device).to(device)
 
 # return the base for the energy model
-def get_base(args,input_dims,device):
+def get_base(args,input_dims,device, dataloader = None):
     if args.generator == 'convolutional':
         net = Generator(nz=args.Z_dim, nn_type=args.g_model).to(device)
     elif args.generator =='gaussian':
@@ -330,6 +339,15 @@ def get_base(args,input_dims,device):
         net = energy_model.FlowGenerator([input_dims], device,args.num_blocks, 'mogmaf',  mode='generator', with_bn=args.gen_bn).to(device)
     elif args.generator == 'toy':
         net = tm.Generator(3)
+    elif args.generator == 'ppca':
+        data = torch.cat([data for data, _ in iter(dataloader)])
+        input_size = data.shape[1:]
+        net = ProbabilisticPCA(input_size, data, n_latents=args.Z_dim,).to(device)
+    elif args.generator == 'flow':
+        data = torch.cat([data for data, _ in iter(dataloader)])
+        input_size = data.shape[1:]
+        net = FlowPlusPLusimputer(input_size, data=data)
+        
     return net
 
 def init_logs(args, run_id, log_dir):

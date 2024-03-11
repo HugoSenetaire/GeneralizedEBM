@@ -1,15 +1,14 @@
-b_size: 128
+b_size: 64
 
 total_gen_iter: 150000
 
 
-# g_model : 'resnet-sn'
+# g_model : 'ppca'
 generator : 'flow'
-
 d_model : 'resnet-sn'
 
 optimizer: Adam
-criterion : 'kale'
+criterion : 'snl'
 log_dir : 'logs/'
 data_path : 'data/'
 log_name : ''

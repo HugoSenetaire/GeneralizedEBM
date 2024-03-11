@@ -38,6 +38,12 @@ def kale(true_data,fake_data,loss_type):
     else:
         return -true_data.mean() #- torch.exp(-fake_data).mean()  + 1
 
+def snl(true_data,fake_data,loss_type):
+    if loss_type=='discriminator':
+        return true_data.mean() + torch.exp(-fake_data).mean()  - 1
+        # return  true_data.mean() + torch.log(1+torch.exp(-fake_data)).mean()
+    else:
+        return -true_data.mean()
 
 # calculates regularization penalty term for learning
 def penalty_d(args, d, true_data, fake_data, device):
@@ -75,7 +81,7 @@ def _gradient_penalty(d, true_data, fake_data, device):
     alpha = alpha.expand_as(true_data)
     alpha = alpha.to(device)
     
-    interpolated = alpha*true_data.data[:size_inter] + (1-alpha)*fake_data.data[:size_inter]
+    interpolated = alpha*true_data.data[:size_inter].detach() + (1-alpha)*fake_data.data[:size_inter].detach()
     #interpolated = torch.cat([true_data.data,fake_data.data],dim=0)
     interpolated = Variable(interpolated, requires_grad=True).to(device)
 

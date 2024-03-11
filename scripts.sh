@@ -5,7 +5,7 @@
 
 
 # Training the model 
-python main.py --config=configs/training.yaml --dataset=cifar10
+python main.py --config=configs/training_theres.yaml --dataset=cifar10
 
 
 # Sampling from trained model

@@ -3,13 +3,12 @@ b_size: 128
 total_gen_iter: 150000
 
 
-# g_model : 'resnet-sn'
-generator : 'flow'
-
+# g_model : 'ppca'
+generator : 'ppca'
 d_model : 'resnet-sn'
 
 optimizer: Adam
-criterion : 'kale'
+criterion : 'snl'
 log_dir : 'logs/'
 data_path : 'data/'
 log_name : ''
@@ -24,7 +23,7 @@ beta_2 : 0.999
 
 # train
 mode : 'train'
-train_mode : 'both'
+train_mode : 'energy'
 with_fid : True
 
 

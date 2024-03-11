@@ -3,9 +3,7 @@ b_size: 128
 total_gen_iter: 150000
 
 
-# g_model : 'resnet-sn'
-generator : 'flow'
-
+g_model : 'resnet-sn'
 d_model : 'resnet-sn'
 
 optimizer: Adam

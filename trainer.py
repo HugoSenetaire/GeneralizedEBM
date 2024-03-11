@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 
 import numpy as np
+import tqdm
+import torch
 
 import csv
 import sys
@@ -29,6 +31,10 @@ import models
 from utils.fid_scheduler import FIDScheduler, MMDScheduler
 from utils import vizualization as viz
 from utils import kid_score
+import wandb
+import torchvision
+
+
 
 class Trainer(object):
     def __init__(self, args):
@@ -37,6 +43,8 @@ class Trainer(object):
         self.args = args
         self.device = hp.assign_device(args.device)
         self.run_id = str(round(time.time() % 1e7))
+        self.logger = wandb.init(project='GEBM', config=args, name=self.run_id)
+
         print(f"Run id: {self.run_id}")
         self.log_dir, self.checkpoint_dir, self.samples_dir = hp.init_logs(args, self.run_id, self.log_dir_formatter(args) )
         
@@ -59,10 +67,10 @@ class Trainer(object):
 
     def build_model(self):
         self.train_loader, self.test_loader, self.valid_loader,self.input_dims = hp.get_data_loader(self.args,self.args.b_size, self.args.num_workers)
-        
-        self.generator = hp.get_base(self.args, self.input_dims, self.device)
-        self.discriminator = hp.get_energy(self.args,self.input_dims, self.device)
-        self.noise_gen = hp.get_latent_noise(self.args,self.args.Z_dim, self.device)
+        input_size = next(iter(self.train_loader))[0].shape[1:]
+        self.generator = hp.get_base(self.args, self.input_dims, self.device, dataloader=self.train_loader).to(self.device)
+        self.discriminator = hp.get_energy(self.args,self.input_dims, self.device).to(self.device)
+        self.noise_gen = hp.get_latent_noise(self.args,self.args.Z_dim, self.device, input_size)
         self.fixed_latents = self.noise_gen.sample([64])
         self.eval_latents =torch.cat([ self.noise_gen.sample([self.args.sample_b_size]).cpu() for b in range(int(self.args.fid_samples/self.args.sample_b_size)+1)], dim=0)
         self.eval_latents = self.eval_latents[:self.args.fid_samples]
@@ -78,7 +86,7 @@ class Trainer(object):
             self.discriminator.eval()
 
         else:
-            if self.args.criterion == 'kale':
+            if self.args.criterion == 'kale' or self.args.criterion == 'snl':
                 self.log_partition = nn.Parameter(torch.zeros(1).to(self.device))
                 self.d_params.append(self.log_partition)
             else:
@@ -175,19 +183,34 @@ class Trainer(object):
 
     def train_epoch(self):
 
-        for batch_idx, (data, target) in enumerate(self.train_loader):
+        for batch_idx, (data, target) in tqdm.tqdm(enumerate(self.train_loader)):
             data = data.to(self.device).clone().detach()
             self.counter += 1
             is_gstep, is_dstep = self.which_step()
             # discriminator takes n_iter_d steps of learning for each generator step
             if is_gstep:
                 self.g_counter +=1
-                self.g_loss = self.iteration(data, net_type='generator')
+                self.g_loss, dic = self.iteration(data, net_type='generator')
                 self.accum_loss_g.append(self.g_loss.item())
             else:
-                self.d_loss = self.iteration(data, net_type='discriminator')
+                self.d_loss, dic = self.iteration(data, net_type='discriminator')
                 self.accum_loss_d.append(self.d_loss.item())
-            
+
+            self.logger.log({'g_loss':self.g_loss.item(), 'd_loss':self.d_loss.item(), 'g_counter': self.g_counter}, step=self.counter)
+            self.logger.log(dic, step=self.counter)
+
+            if (self.counter % 300) == 0 :
+                print("Saving samples")
+                fake = self.sample_images(self.fixed_latents, self.args.sample_b_size)
+                grid = torchvision.utils.make_grid(fake, nrow=8, normalize=True)
+                torchvision.utils.save_image(
+                    grid, os.path.join(self.samples_dir, f'Iter_{str(self.counter).zfill(5)}.png')
+                )
+                print("Saved at {}".format(os.path.join(self.samples_dir, f'Iter_{str(self.counter).zfill(5)}.png')))
+
+                image = wandb.Image(grid, caption = "{}_{}.png".format("sample", self.counter))
+                self.logger.log({'sample' :image}, step=self.counter)
+                
             if self.args.train_mode =='both':
                 counter = self.g_counter
                 is_valid_step = is_gstep
@@ -217,10 +240,13 @@ class Trainer(object):
                     self.timer(self.counter, " energy loss: %.8f" % ad)
                     self.accum_loss_d = []
 
-            if counter % self.args.checkpoint_freq == 0 and is_valid_step:
-                if self.args.train_mode in ['both', 'base'] and self.args.dataset_type=='images':
-                    images = self.sample_images(self.fixed_latents, self.args.sample_b_size)
-                    viz.make_and_save_grid_images(images, f'Iter_{str(self.g_counter).zfill(3)}', self.samples_dir)
+            if self.counter % self.args.checkpoint_freq == 0 and is_valid_step:
+                print('==> Saving model..')
+                # if self.args.train_mode in ['both', 'base'] and self.args.dataset_type=='images':
+                #     images = self.sample_images(self.fixed_latents, self.args.sample_b_size)
+                #     grid = torchvision.utils.make_grid(images, nrow=8, normalize=True)
+                #     self.logger.log({'sample' :grid}, step=self.g_counter)
+                #     viz.make_and_save_grid_images(images, f'Iter_{str(self.g_counter).zfill(3)}', self.samples_dir)
                 self.save_checkpoint(self.g_counter)
 
             self.eval_fid = is_gstep and np.mod(self.g_counter, self.args.freq_fid)==0  and self.args.eval_fid
@@ -279,23 +305,52 @@ class Trainer(object):
             fake_results = self.discriminator(fake_data)
             log_partition, batch_log_partition = self.compute_log_partition(fake_results, net_type ,with_batch_est=True)
 
-        if self.args.criterion in ['kale','donsker']:
+
+        # print(net_type, np.abs(log_partition.item()- batch_log_partition.item()), np.abs(log_partition.item()- self.log_partition.item()))
+        dic = {}
+        dic['true_results'] = true_results.mean().item()
+        dic['fake_results'] = fake_results.mean().item()
+        dic['log_partition_estimated'] = log_partition.item()
+        dic['log_partition_batch_estimated'] = batch_log_partition.mean().item()
+        dic['log_partition'] = self.log_partition.item()
+
+        # if net_type == 'generator':
+            # print(torch.autograd.grad(true_results.mean(), list(self.generator.parameters()), retain_graph=True, create_graph=True).abs().mean())
+            # print(torch.autograd.grad(log_partition, list(self.generator.parameters()), retain_graph=True, create_graph=True))
+        if self.args.criterion in ['kale','donsker', 'snl']:
             true_results = true_results + log_partition
             fake_results = fake_results + log_partition
+
+        if self.args.criterion == 'snl':
+            log_prob_gen = self.generator.log_prob_simple(fake_data)
+            true_results -= log_prob_gen.detach()
+            dic['log_prob_gen'] = log_prob_gen.mean().item()
+        dic['true_results_added'] = true_results.mean().item()
+        dic['fake_results_added'] = fake_results.mean().item()
+
         # calculate loss and propagate
         loss = self.loss(true_results, fake_results, net_type)
+        dic['loss'] = loss.item()
 
         if train_mode:
-            total_loss = self.add_penalty(loss, net_type, data, fake_data)
-            total_loss.backward()
+            total_loss, dic_penalty = self.add_penalty(loss, net_type, data, fake_data)
+            dic.update(dic_penalty)
+            total_loss.backward(retain_graph=True)
             if self.args.grad_clip>0:
                 self.grad_clip(optimizer, net_type=net_type)
             optimizer.step()
 
-        #if net_type == 'discriminator' and loss>0. and self.args.criterion in ['kale','donsker']:
-        #    self.log_partition.data = batch_log_partition.detach().clone()
+        # if net_type == 'discriminator' :
+        #     Z_2 = self.noise_gen.sample([self.args.noise_factor*data.shape[0]])
+        #     log_partition_2, batch_log_partition_2 = self.compute_log_partition(self.discriminator(self.generator(Z_2)), net_type ,with_batch_est=True)
+        #     log_partition_loss = (self.log_partition-batch_log_partition_2).exp() -1
+        #     dic['log_partition_loss'] = log_partition_loss.item()
+        #     if train_mode:
+        #         self.optim_partition.zero_grad()
+        #         log_partition_loss.backward()
+        #         self.optim_partition.step()
         #print(loss.item())
-        return loss
+        return loss, dic
 
     def prepare_optimizer(self,net_type):
         if net_type=='discriminator':           
@@ -310,23 +365,32 @@ class Trainer(object):
         return optimizer
 
     def add_penalty(self,loss, net_type, data, fake_data):
+        dic = {}
         if net_type=='discriminator':
             penalty = self.args.penalty_lambda * cp.penalty_d(self.args, self.discriminator, data, fake_data, self.device)
             total_loss = loss + penalty
+            dic['penalty'] = penalty.item()
         else:
             total_loss = loss
-        return total_loss
+        return total_loss, dic
 
     def init_log_partition(self):
+        import tqdm
         log_partition = torch.tensor(0.).to(self.device)
         M = 0
         num_batches = 100
         self.generator.eval()
         self.discriminator.eval()
-        for batch_idx in range(num_batches):
+        for batch_idx in tqdm.tqdm(range(num_batches)):
             with torch.no_grad():
-                Z = self.noise_gen.sample([self.args.sample_b_size])
+                # if self.args.generator == 'flow':
+                    # Z = torch.randn([self.args.sample_b_size, ]).to(self.device)
+                # else :
+                Z = self.noise_gen.sample([self.args.sample_b_size]).to(self.device)
+                # print(Z.shape)
                 fake_data = self.generator(Z)
+                # print(self.generator.log_prob_simple(fake_data))
+
                 fake_data = -self.discriminator(fake_data)
                 log_partition,M = cp.iterative_log_sum_exp(fake_data,log_partition,M)
         log_partition = log_partition - np.log(M)
@@ -682,7 +746,7 @@ class TrainerEBM(Trainer):
             elif net_type =='generator':
                 model = self.generator
             loss = -model.log_density(data).mean()
-        total_loss = self.add_penalty(loss, net_type, data, gen_fdata_in)
+        total_loss, dic = self.add_penalty(loss, net_type, data, gen_fdata_in)
 
         loss.backward()
         optimizer.step()
